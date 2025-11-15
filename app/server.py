@@ -3,7 +3,9 @@ import json
 from pathlib import Path
 from urllib.parse import parse_qs
 
-from auth.auth import verify_credentials
+from auth.auth import UserRepository
+
+user_repository = UserRepository()
 
 
 class CaptivePortalHandler(BaseHTTPRequestHandler):
@@ -81,7 +83,7 @@ class CaptivePortalHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"status": "error", "message": "Faltan campos username o password"})
             return
 
-        if verify_credentials(username, password):
+        if user_repository.verify_credentials(username, password):
             self._send_json(200, {
                 "status": "ok",
                 "message": "Login exitoso",
@@ -92,4 +94,3 @@ class CaptivePortalHandler(BaseHTTPRequestHandler):
                 "status": "error",
                 "message": "Credenciales inválidas"
             })
-
