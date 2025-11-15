@@ -41,3 +41,24 @@ def get_mac_for_ip(ip: str, iface: str = LAN_IF) -> str | None:
         return None
 
     return None
+
+
+
+##TODO: BORRAR LO SIGUIENTE SI AL FINAL NO SE VA A USAR
+# Otra forma de obtener la mac a traves de comandos
+
+import subprocess
+
+def get_mac_for_ip_cmd(ip: str, iface: str = LAN_IF) -> str | None:
+    validate_ip(ip)
+    out = subprocess.check_output(
+        ["ip", "neigh", "show", "dev", iface, ip],
+        text=True
+    )
+    # Ejemplo de salida:
+    # 192.168.42.10 lladdr aa:bb:cc:dd:ee:ff REACHABLE
+    parts = out.split()
+    if "lladdr" in parts:
+        idx = parts.index("lladdr")
+        return parts[idx + 1].lower()
+    return None
