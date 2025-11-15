@@ -4,7 +4,7 @@ import secrets
 import threading
 from pathlib import Path
 from http.cookies import SimpleCookie
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class SessionRepository:
@@ -183,31 +183,32 @@ class SessionRepository:
             self._save_to_disk_locked()
             return ip
 
-    def cleanup_expired_sessions(self) -> List[str]:
+    def cleanup_expired_sessions(self) -> List[Tuple[str, Optional[str]]]:
         """
         Elimina todas las sesiones expiradas del cache y de JSON.
-        Devuelve lista de IPs afectadas (para cortarles el firewall fuera de aquí).
+        Devuelve lista de pares (ip, mac) afectados para que el firewall pueda
+        eliminar correctamente la regla asociada.
         Escritura: actualiza RAM y persiste si hubo cambios.
         """
         now = time.time()
-        expired_ips: List[str] = []
+        expired_clients: List[Tuple[str, Optional[str]]] = []
 
         with self._lock:
-            to_delete = []
+            to_delete: List[Tuple[str, str, Optional[str]]] = []
             for sid, session in self._sessions.items():
                 if session.get("expires_at", 0) <= now:
-                    to_delete.append((sid, session["ip"]))
+                    to_delete.append((sid, session["ip"], session.get("mac")))
 
-            for sid, ip in to_delete:
+            for sid, ip, mac in to_delete:
                 self._sessions.pop(sid, None)
                 current_sid = self._auth_clients.get(ip)
                 if current_sid == sid:
                     self._auth_clients.pop(ip, None)
-                expired_ips.append(ip)
+                expired_clients.append((ip, mac))
 
             if to_delete:
                 self._save_to_disk_locked()
 
-        return expired_ips
+        return expired_clients
 
 #TODO: QUE la cache funcione bien, con tamanno limite
