@@ -1,5 +1,6 @@
 import json
 import socket
+import subprocess
 import threading
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -9,6 +10,8 @@ from auth.repositories.user_repository import UserRepository
 HOST = "0.0.0.0"
 PORT = 8080
 TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "login.html"
+LAN_IF = "wlan0"
+WAN_IF = "eth0"
 
 STATUS_REASONS = {
     200: "OK",
@@ -22,6 +25,37 @@ STATUS_REASONS = {
 }
 
 user_repository = UserRepository()
+
+
+def allow_ip_to_internet(ip, lan_if=LAN_IF, wan_if=WAN_IF):
+    """
+    Añade una regla de iptables para permitir al cliente salir a Internet.
+    Usa check=False para no explotar si la regla ya existe.
+    """
+    if not ip:
+        return False
+    try:
+        subprocess.run(
+            [
+                "sudo",
+                "iptables",
+                "-A",
+                "FORWARD",
+                "-i",
+                lan_if,
+                "-o",
+                wan_if,
+                "-s",
+                ip,
+                "-j",
+                "ACCEPT",
+            ],
+            check=False,
+        )
+        return True
+    except Exception as exc:
+        print(f"No se pudo ejecutar iptables para {ip}: {exc}")
+        return False
 
 
 def build_response(status_code, body=b"", headers=None):
@@ -127,7 +161,7 @@ def handle_login(method, path, headers, body, client_ip):
         }
 
     if user_repository.verify_credentials(username, password):
-        # Aquí podrías enganchar tu mecanismo para liberar al cliente en la red.
+        allow_ip_to_internet(client_ip)
         return 200, {
             "status": "ok",
             "message": "Login exitoso",
