@@ -1,96 +1,231 @@
-from http.server import BaseHTTPRequestHandler
 import json
+import socket
+import subprocess
+import threading
 from pathlib import Path
 from urllib.parse import parse_qs
 
-from auth.auth import UserRepository
+from auth.repositories.user_repository import UserRepository
+
+HOST = "0.0.0.0"
+PORT = 8080
+TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "login.html"
+LAN_IF = "wlo1"
+WAN_IF = "enx0237677e7807"
+
+STATUS_REASONS = {
+    200: "OK",
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    415: "Unsupported Media Type",
+    500: "Internal Server Error",
+}
 
 user_repository = UserRepository()
 
 
-class CaptivePortalHandler(BaseHTTPRequestHandler):
+def ensure_forward_rule(ip, lan_if, wan_if, extra_flags=None):
+    """
+    Garantiza que exista la regla FORWARD indicada (evita duplicados).
+    """
+    extra_flags = extra_flags or []
+    base = ["-s", ip, "-i", lan_if, "-o", wan_if] + extra_flags + ["-j", "ACCEPT"]
+    try:
+        result = subprocess.run(
+            ["sudo", "iptables", "-C", "FORWARD", *base],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if result.returncode != 0:
+            subprocess.run(
+                ["sudo", "iptables", "-A", "FORWARD", *base],
+                check=False,
+            )
+    except Exception as exc:
+        print(f"No se pudo ajustar iptables para {ip}: {exc}")
 
-    TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "login.html"
 
-    def _send_json(self, status_code, payload):
-        response_bytes = json.dumps(payload).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(response_bytes)))
-        self.end_headers()
-        self.wfile.write(response_bytes)
+def allow_ip_to_internet(ip, lan_if=LAN_IF, wan_if=WAN_IF):
+    if not ip:
+        return False
+    try:
+        for proto in ("udp", "tcp"):
+            ensure_forward_rule(ip, lan_if, wan_if, ["-p", proto, "--dport", "53"])
+        ensure_forward_rule(ip, lan_if, wan_if)
+        return True
+    except Exception as exc:
+        print(f"No se pudo ejecutar iptables para {ip}: {exc}")
+        return False
 
-    def _send_html(self, status_code, html_text):
-        response_bytes = html_text.encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(response_bytes)))
-        self.end_headers()
-        self.wfile.write(response_bytes)
 
-    def do_GET(self):
-        if self.path in ("/", "/login"):
-            self.serve_login_page()
-        else:
-            self._send_json(404, {"status": "error", "message": "Endpoint no encontrado"})
 
-    def serve_login_page(self):
+
+def build_response(status_code, body=b"", headers=None):
+    reason = STATUS_REASONS.get(status_code, "OK")
+    status_line = f"HTTP/1.1 {status_code} {reason}\r\n"
+    headers = headers or {}
+    base_headers = {
+        "Content-Length": str(len(body)),
+        "Connection": "close",
+    }
+    base_headers.update(headers)
+    header_lines = "".join(f"{k}: {v}\r\n" for k, v in base_headers.items())
+    return (status_line + header_lines + "\r\n").encode("utf-8") + body
+
+
+def send_json(conn, status_code, payload):
+    body = json.dumps(payload).encode("utf-8")
+    response = build_response(
+        status_code,
+        body=body,
+        headers={"Content-Type": "application/json"},
+    )
+    conn.sendall(response)
+
+
+def send_html(conn, status_code, html_text):
+    body = html_text.encode("utf-8")
+    response = build_response(
+        status_code,
+        body=body,
+        headers={"Content-Type": "text/html; charset=utf-8"},
+    )
+    conn.sendall(response)
+
+
+def parse_http_request(conn):
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+
+    if not data:
+        raise ValueError("Petición vacía")
+
+    header_part, rest = data.split(b"\r\n\r\n", 1)
+    header_text = header_part.decode("utf-8", errors="replace")
+    lines = header_text.split("\r\n")
+
+    request_line = lines[0]
+    try:
+        method, path, version = request_line.split(" ")
+    except ValueError:
+        raise ValueError("Línea de petición inválida")
+
+    headers = {}
+    for line in lines[1:]:
+        if not line or ":" not in line:
+            continue
+        name, value = line.split(":", 1)
+        headers[name.strip().lower()] = value.strip()
+
+    body = rest
+    content_length = int(headers.get("content-length", "0") or "0")
+    while len(body) < content_length:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        body += chunk
+
+    return method, path, version, headers, body
+
+
+def handle_login(method, path, headers, body, client_ip):
+    if method != "POST":
+        return 405, {"status": "error", "message": "Method Not Allowed"}
+
+    content_type = headers.get("content-type", "")
+    content_type = content_type.split(";")[0].strip() or "application/json"
+
+    username = None
+    password = None
+
+    if content_type == "application/json":
         try:
-            html = self.TEMPLATE_PATH.read_text(encoding="utf-8")
-        except OSError:
-            self._send_json(500, {"status": "error", "message": "Template no disponible"})
-            return
+            data = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError:
+            return 400, {"status": "error", "message": "JSON inválido"}
+        username = data.get("username") or data.get("email")
+        password = data.get("password")
+    elif content_type == "application/x-www-form-urlencoded":
+        parsed = parse_qs(body.decode("utf-8"))
+        username = (parsed.get("username") or parsed.get("email") or [None])[0]
+        password = (parsed.get("password") or [None])[0]
+    else:
+        return 415, {"status": "error", "message": "Content-Type no soportado"}
 
-        self._send_html(200, html)
+    if not username or not password:
+        return 400, {
+            "status": "error",
+            "message": "Faltan campos username o password",
+        }
 
-    def do_POST(self):
-        if self.path == "/login":
-            self.handle_login()
+    if user_repository.verify_credentials(username, password):
+        allow_ip_to_internet(client_ip)
+        return 200, {
+            "status": "ok",
+            "message": "Login exitoso",
+            "username": username,
+        }
+
+    return 401, {
+        "status": "error",
+        "message": "Credenciales inválidas",
+    }
+
+
+def serve_login_page():
+    try:
+        html = TEMPLATE_PATH.read_text(encoding="utf-8")
+        return 200, html
+    except OSError:
+        return 500, "<h1>Error 500</h1><p>Template no disponible</p>"
+
+
+def handle_client(conn, addr):
+    client_ip, _ = addr
+    try:
+        method, path, version, headers, body = parse_http_request(conn)
+    except ValueError as exc:
+        send_json(conn, 400, {"status": "error", "message": str(exc)})
+        conn.close()
+        return
+    except Exception as exc:
+        send_json(conn, 500, {"status": "error", "message": f"Error interno: {exc}"})
+        conn.close()
+        return
+
+    try:
+        if method == "GET":
+            status_code, html = serve_login_page()
+            send_html(conn, status_code, html)
+        elif method == "POST" and path == "/login":
+            status_code, payload = handle_login(method, path, headers, body, client_ip)
+            send_json(conn, status_code, payload)
         else:
-            self._send_json(404, {"status": "error", "message": "Endpoint no encontrado"})
+            send_json(conn, 404, {"status": "error", "message": "Endpoint no encontrado"})
+    except Exception as exc:
+        send_json(conn, 500, {"status": "error", "message": f"Error interno: {exc}"})
+    finally:
+        conn.close()
 
-    def handle_login(self):
-        try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            self._send_json(400, {"status": "error", "message": "Content-Length inválido"})
-            return
 
-        body_bytes = self.rfile.read(content_length)
-        content_type = (self.headers.get("Content-Type", "").split(";")[0] or
-                        "application/json").strip()
+def run_server():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind((HOST, PORT))
+        server_socket.listen(50)
+        print(f"Servidor HTTP simple escuchando en {HOST}:{PORT}")
+        while True:
+            conn, addr = server_socket.accept()
+            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
-        username = None
-        password = None
 
-        if content_type == "application/json":
-            try:
-                data = json.loads(body_bytes.decode("utf-8"))
-            except json.JSONDecodeError:
-                self._send_json(400, {"status": "error", "message": "JSON inválido"})
-                return
-            username = data.get("username") or data.get("email")
-            password = data.get("password")
-        elif content_type == "application/x-www-form-urlencoded":
-            parsed = parse_qs(body_bytes.decode("utf-8"))
-            username = (parsed.get("username") or parsed.get("email") or [None])[0]
-            password = (parsed.get("password") or [None])[0]
-        else:
-            self._send_json(415, {"status": "error", "message": "Content-Type no soportado"})
-            return
-
-        if not username or not password:
-            self._send_json(400, {"status": "error", "message": "Faltan campos username o password"})
-            return
-
-        if user_repository.verify_credentials(username, password):
-            self._send_json(200, {
-                "status": "ok",
-                "message": "Login exitoso",
-                "username": username
-            })
-        else:
-            self._send_json(401, {
-                "status": "error",
-                "message": "Credenciales inválidas"
-            })
+if __name__ == "__main__":
+    run_server()
