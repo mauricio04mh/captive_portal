@@ -10,8 +10,8 @@ from auth.repositories.user_repository import UserRepository
 HOST = "0.0.0.0"
 PORT = 8080
 TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "login.html"
-LAN_IF = "wlan0"
-WAN_IF = "eth0"
+LAN_IF = "wlo1"
+WAN_IF = "enx0237677e7807"
 
 STATUS_REASONS = {
     200: "OK",
@@ -27,35 +27,41 @@ STATUS_REASONS = {
 user_repository = UserRepository()
 
 
+def ensure_forward_rule(ip, lan_if, wan_if, extra_flags=None):
+    """
+    Garantiza que exista la regla FORWARD indicada (evita duplicados).
+    """
+    extra_flags = extra_flags or []
+    base = ["-s", ip, "-i", lan_if, "-o", wan_if] + extra_flags + ["-j", "ACCEPT"]
+    try:
+        result = subprocess.run(
+            ["sudo", "iptables", "-C", "FORWARD", *base],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if result.returncode != 0:
+            subprocess.run(
+                ["sudo", "iptables", "-A", "FORWARD", *base],
+                check=False,
+            )
+    except Exception as exc:
+        print(f"No se pudo ajustar iptables para {ip}: {exc}")
+
+
 def allow_ip_to_internet(ip, lan_if=LAN_IF, wan_if=WAN_IF):
-    """
-    Añade una regla de iptables para permitir al cliente salir a Internet.
-    Usa check=False para no explotar si la regla ya existe.
-    """
     if not ip:
         return False
     try:
-        subprocess.run(
-            [
-                "sudo",
-                "iptables",
-                "-A",
-                "FORWARD",
-                "-i",
-                lan_if,
-                "-o",
-                wan_if,
-                "-s",
-                ip,
-                "-j",
-                "ACCEPT",
-            ],
-            check=False,
-        )
+        for proto in ("udp", "tcp"):
+            ensure_forward_rule(ip, lan_if, wan_if, ["-p", proto, "--dport", "53"])
+        ensure_forward_rule(ip, lan_if, wan_if)
         return True
     except Exception as exc:
         print(f"No se pudo ejecutar iptables para {ip}: {exc}")
         return False
+
+
 
 
 def build_response(status_code, body=b"", headers=None):

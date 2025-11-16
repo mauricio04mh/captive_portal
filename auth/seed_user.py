@@ -9,7 +9,10 @@ import getpass
 import secrets
 import sys
 
-from auth.auth import USERS_FILE, hash_password, load_users, save_users
+from auth.repositories.user_repository import UserRepository
+
+user_repository = UserRepository()
+USERS_FILE = user_repository.users_file
 
 
 def parse_args():
@@ -35,7 +38,7 @@ def main():
         print("[seed] La contraseña no puede estar vacía", file=sys.stderr)
         return 1
 
-    data = load_users()
+    data = user_repository.load_users()
     users = data.setdefault("users", {})
 
     if args.username in users and not args.force:
@@ -46,13 +49,13 @@ def main():
         return 1
 
     salt = secrets.token_hex(16)
-    password_hash = hash_password(password, salt)
+    password_hash = UserRepository.hash_password(password, salt)
     users[args.username] = {
         "salt": salt,
         "password_hash": password_hash,
     }
 
-    save_users(data)
+    user_repository.save_users(data)
     print(f"[seed] Usuario '{args.username}' almacenado en {USERS_FILE}")
     return 0
 
