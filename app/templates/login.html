@@ -88,6 +88,15 @@
         box-shadow: 0 10px 25px rgba(37, 99, 235, 0.35);
       }
 
+      button.logout-button {
+        margin-top: 0.75rem;
+        background: linear-gradient(135deg, #dc2626, #b91c1c);
+      }
+
+      button.logout-button:hover {
+        box-shadow: 0 10px 25px rgba(220, 38, 38, 0.35);
+      }
+
       #status {
         min-height: 1.25rem;
         margin-top: 0.5rem;
@@ -126,11 +135,13 @@
         <button type="submit">Conectar</button>
       </form>
       <div id="status" role="status" aria-live="polite"></div>
+      <button type="button" id="logout-button" class="logout-button">Terminar sesión</button>
       <small>Al iniciar sesión aceptas los términos de uso de esta red.</small>
     </main>
     <script>
       const form = document.getElementById("login-form");
       const statusBox = document.getElementById("status");
+      const logoutButton = document.getElementById("logout-button");
 
       const setStatus = (message, type = "info") => {
         statusBox.textContent = message;
@@ -167,6 +178,22 @@
           }
         } catch (error) {
           setStatus("No se pudo contactar el servidor", "error");
+        }
+      });
+      logoutButton.addEventListener("click", async () => {
+        setStatus("Terminando sesión…", "info");
+        try {
+          const response = await fetch("/logout", {
+            method: "POST"
+          });
+          const data = await response.json();
+          if (response.ok) {
+            setStatus(data.message || "Sesión cerrada", "ok");
+          } else {
+            setStatus(data.message || "No se pudo cerrar la sesión", "error");
+          }
+        } catch (error) {
+          setStatus("No se pudo cerrar la sesión", "error");
         }
       });
     </script>

@@ -1,6 +1,8 @@
 import json
+import signal
 import socket
 import threading
+from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -29,6 +31,8 @@ user_repository = UserRepository()
 session_repository = SessionRepository()
 session_cleanup_service = SessionCleanupService(session_repository)
 firewall = firewall_module
+_shutdown_event = threading.Event()
+_server_socket: socket.socket | None = None
 
 
 def build_response(status_code, body=b"", headers=None):
@@ -63,6 +67,18 @@ def send_html(conn, status_code, html_text):
         headers={"Content-Type": "text/html; charset=utf-8"},
     )
     conn.sendall(response)
+
+
+def _extract_session_id(headers):
+    cookie_header = headers.get("cookie") or headers.get("Cookie")
+    if not cookie_header:
+        return None
+    cookie = SimpleCookie()
+    cookie.load(cookie_header)
+    morsel = cookie.get("session_id")
+    if not morsel:
+        return None
+    return morsel.value
 
 
 def parse_http_request(conn):
@@ -159,6 +175,33 @@ def handle_login(method, headers, body, client_ip):
     }, None
 
 
+def handle_logout(headers):
+    session_id = _extract_session_id(headers)
+    clear_cookie = "session_id=; Path=/; Max-Age=0; HttpOnly"
+    if not session_id:
+        return 200, {
+            "status": "ok",
+            "message": "No había sesión activa",
+        }, {"Set-Cookie": clear_cookie}
+
+    session = session_repository.get_session(session_id)
+    session_repository.destroy_session(session_id)
+
+    if session:
+        ip = session.get("ip")
+        mac = session.get("mac")
+        if ip:
+            try:
+                firewall.deny_client_in_firewall(ip, mac)
+            except Exception as exc:
+                print(f"[firewall] No se pudo bloquear {ip}: {exc}")
+
+    return 200, {
+        "status": "ok",
+        "message": "Sesión cerrada",
+    }, {"Set-Cookie": clear_cookie}
+
+
 def serve_login_page():
     try:
         html = TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -189,6 +232,9 @@ def handle_client(conn, addr):
                 method, headers, body, client_ip
             )
             send_json(conn, status_code, payload, headers=extra_headers)
+        elif method == "POST" and path == "/logout":
+            status_code, payload, extra_headers = handle_logout(headers)
+            send_json(conn, status_code, payload, headers=extra_headers)
         else:
             send_json(conn, 404, {"status": "error", "message": "Endpoint no encontrado"})
     except Exception as exc:
@@ -198,6 +244,8 @@ def handle_client(conn, addr):
 
 
 def shutdown_services():
+    if getattr(shutdown_services, "_done", False):
+        return
     try:
         clients = session_repository.destroy_all_sessions()
     except Exception as exc:
@@ -211,22 +259,48 @@ def shutdown_services():
             print(f"[shutdown] Error bloqueando {ip}: {exc}")
 
     session_cleanup_service.stop()
+    shutdown_services._done = True  # type: ignore[attr-defined]
+
+
+def _handle_termination(signum, _frame):
+    print(f"\nRecibida señal {signum}, deteniendo servidor...")
+    _shutdown_event.set()
+    global _server_socket
+    sock = _server_socket
+    if sock:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 def run_server():
     session_repository.init_store()
     session_cleanup_service.start()
+    signal.signal(signal.SIGTERM, _handle_termination)
+    signal.signal(signal.SIGINT, _handle_termination)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+        global _server_socket
+        _server_socket = server_socket
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((HOST, PORT))
         server_socket.listen(50)
         print(f"Servidor HTTP simple escuchando en {HOST}:{PORT}")
         try:
-            while True:
-                conn, addr = server_socket.accept()
-                threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
-        except KeyboardInterrupt:
-            print("\nServidor detenido por el usuario.")
+            while not _shutdown_event.is_set():
+                try:
+                    conn, addr = server_socket.accept()
+                except OSError:
+                    if _shutdown_event.is_set():
+                        break
+                    raise
+                threading.Thread(
+                    target=handle_client, args=(conn, addr), daemon=True
+                ).start()
         finally:
             shutdown_services()
 
