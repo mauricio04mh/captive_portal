@@ -202,7 +202,7 @@ def handle_client(conn, addr):
         return
 
     try:
-        if method == "GET" and path in ("/", "/login"):
+        if method == "GET":
             status_code, html = serve_login_page()
             send_html(conn, status_code, html)
         elif method == "POST" and path == "/login":

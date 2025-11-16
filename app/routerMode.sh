@@ -72,34 +72,8 @@ start_router() {
     iptables -P INPUT ACCEPT
     iptables -P OUTPUT ACCEPT
     iptables -P FORWARD DROP
-    iptables -t nat -A POSTROUTING -o "$WAN_IF" -j MASQUERADE
-    iptables -A FORWARD -i "$WAN_IF" -o "$LAN_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    iptables -A FORWARD -i "$LAN_IF" -o "$WAN_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    iptables -t nat -A PREROUTING -i "$LAN_IF" -p tcp --dport 80 -j REDIRECT --to-port "$HTTP_PORT"
-
-    start_server
-    open_login
-    echo "Portal cautivo activo en http://127.0.0.1:${HTTP_PORT}/login"
-}
-
-start_router() {
-    echo "Activando modo portal..."
-    mkdir -p "$BACKUP_DIR"
-    [[ -f "$IPTABLES_BACKUP" ]] || iptables-save >"$IPTABLES_BACKUP"
-    [[ -f "$SYSCTL_BACKUP" ]] || cat /proc/sys/net/ipv4/ip_forward >"$SYSCTL_BACKUP"
-
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null
-    iptables -F
-    iptables -t nat -F
-    iptables -t mangle -F
-    iptables -X
-    iptables -P INPUT ACCEPT
-    iptables -P OUTPUT ACCEPT
-    iptables -P FORWARD DROP
-
     iptables -A FORWARD -i "$LAN_IF" -o "$WAN_IF" -p udp --dport 53 -j ACCEPT
     iptables -A FORWARD -i "$LAN_IF" -o "$WAN_IF" -p tcp --dport 53 -j ACCEPT
-
     iptables -t nat -A POSTROUTING -o "$WAN_IF" -j MASQUERADE
     iptables -A FORWARD -i "$WAN_IF" -o "$LAN_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
     iptables -A FORWARD -i "$LAN_IF" -o "$WAN_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
@@ -110,6 +84,20 @@ start_router() {
     echo "Portal cautivo activo en http://127.0.0.1:${HTTP_PORT}/login"
 }
 
+stop_router() {
+    echo "Restaurando configuración..."
+    if [[ -f "$IPTABLES_BACKUP" ]]; then
+        iptables-restore <"$IPTABLES_BACKUP"
+        rm -f "$IPTABLES_BACKUP"
+    fi
+    if [[ -f "$SYSCTL_BACKUP" ]]; then
+        sysctl -w net.ipv4.ip_forward="$(cat "$SYSCTL_BACKUP")" >/dev/null
+        rm -f "$SYSCTL_BACKUP"
+    fi
+    rmdir "$BACKUP_DIR" 2>/dev/null || true
+    stop_server
+    echo "Portal cautivo detenido."
+}
 
 require_root
 
