@@ -209,3 +209,5 @@ class SessionRepository:
                 self._save_to_disk_locked()
 
         return expired_ips
+
+#TODO: QUE la cache funcione bien, con tamanno limite
