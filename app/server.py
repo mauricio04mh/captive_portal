@@ -1,17 +1,18 @@
 import json
 import socket
-import subprocess
 import threading
 from pathlib import Path
 from urllib.parse import parse_qs
 
+from auth.repositories.session_repository import SessionRepository
 from auth.repositories.user_repository import UserRepository
+from auth.services.session_cleanup_service import SessionCleanupService
+from helpers.ip_mac import get_mac_for_ip
+from infra.firewall import firewall as firewall_module
 
 HOST = "0.0.0.0"
 PORT = 8080
 TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "login.html"
-LAN_IF = "wlo1"
-WAN_IF = "enx0237677e7807"
 
 STATUS_REASONS = {
     200: "OK",
@@ -25,43 +26,9 @@ STATUS_REASONS = {
 }
 
 user_repository = UserRepository()
-
-
-def ensure_forward_rule(ip, lan_if, wan_if, extra_flags=None):
-    """
-    Garantiza que exista la regla FORWARD indicada (evita duplicados).
-    """
-    extra_flags = extra_flags or []
-    base = ["-s", ip, "-i", lan_if, "-o", wan_if] + extra_flags + ["-j", "ACCEPT"]
-    try:
-        result = subprocess.run(
-            ["sudo", "iptables", "-C", "FORWARD", *base],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if result.returncode != 0:
-            subprocess.run(
-                ["sudo", "iptables", "-A", "FORWARD", *base],
-                check=False,
-            )
-    except Exception as exc:
-        print(f"No se pudo ajustar iptables para {ip}: {exc}")
-
-
-def allow_ip_to_internet(ip, lan_if=LAN_IF, wan_if=WAN_IF):
-    if not ip:
-        return False
-    try:
-        for proto in ("udp", "tcp"):
-            ensure_forward_rule(ip, lan_if, wan_if, ["-p", proto, "--dport", "53"])
-        ensure_forward_rule(ip, lan_if, wan_if)
-        return True
-    except Exception as exc:
-        print(f"No se pudo ejecutar iptables para {ip}: {exc}")
-        return False
-
-
+session_repository = SessionRepository()
+session_cleanup_service = SessionCleanupService(session_repository)
+firewall = firewall_module
 
 
 def build_response(status_code, body=b"", headers=None):
@@ -77,12 +44,13 @@ def build_response(status_code, body=b"", headers=None):
     return (status_line + header_lines + "\r\n").encode("utf-8") + body
 
 
-def send_json(conn, status_code, payload):
+def send_json(conn, status_code, payload, headers=None):
     body = json.dumps(payload).encode("utf-8")
+    headers = headers or {}
     response = build_response(
         status_code,
         body=body,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **headers},
     )
     conn.sendall(response)
 
@@ -136,9 +104,9 @@ def parse_http_request(conn):
     return method, path, version, headers, body
 
 
-def handle_login(method, path, headers, body, client_ip):
+def handle_login(method, headers, body, client_ip):
     if method != "POST":
-        return 405, {"status": "error", "message": "Method Not Allowed"}
+        return 405, {"status": "error", "message": "Method Not Allowed"}, None
 
     content_type = headers.get("content-type", "")
     content_type = content_type.split(";")[0].strip() or "application/json"
@@ -150,7 +118,7 @@ def handle_login(method, path, headers, body, client_ip):
         try:
             data = json.loads(body.decode("utf-8"))
         except json.JSONDecodeError:
-            return 400, {"status": "error", "message": "JSON inválido"}
+            return 400, {"status": "error", "message": "JSON inválido"}, None
         username = data.get("username") or data.get("email")
         password = data.get("password")
     elif content_type == "application/x-www-form-urlencoded":
@@ -158,26 +126,37 @@ def handle_login(method, path, headers, body, client_ip):
         username = (parsed.get("username") or parsed.get("email") or [None])[0]
         password = (parsed.get("password") or [None])[0]
     else:
-        return 415, {"status": "error", "message": "Content-Type no soportado"}
+        return 415, {"status": "error", "message": "Content-Type no soportado"}, None
 
     if not username or not password:
         return 400, {
             "status": "error",
             "message": "Faltan campos username o password",
-        }
+        }, None
 
     if user_repository.verify_credentials(username, password):
-        allow_ip_to_internet(client_ip)
+        mac = get_mac_for_ip(client_ip)
+        session_id = session_repository.create_session(username, client_ip, mac)
+        cookie = (
+            f"session_id={session_id}; Path=/; HttpOnly; "
+            f"Max-Age={session_repository.session_duration}"
+        )
+
+        try:
+            firewall.allow_client_in_firewall(client_ip, mac)
+        except Exception as exc:
+            print(f"[firewall] No se pudo permitir {client_ip}: {exc}")
+
         return 200, {
             "status": "ok",
             "message": "Login exitoso",
             "username": username,
-        }
+        }, {"Set-Cookie": cookie}
 
     return 401, {
         "status": "error",
         "message": "Credenciales inválidas",
-    }
+    }, None
 
 
 def serve_login_page():
@@ -206,8 +185,10 @@ def handle_client(conn, addr):
             status_code, html = serve_login_page()
             send_html(conn, status_code, html)
         elif method == "POST" and path == "/login":
-            status_code, payload = handle_login(method, path, headers, body, client_ip)
-            send_json(conn, status_code, payload)
+            status_code, payload, extra_headers = handle_login(
+                method, headers, body, client_ip
+            )
+            send_json(conn, status_code, payload, headers=extra_headers)
         else:
             send_json(conn, 404, {"status": "error", "message": "Endpoint no encontrado"})
     except Exception as exc:
@@ -216,15 +197,38 @@ def handle_client(conn, addr):
         conn.close()
 
 
+def shutdown_services():
+    try:
+        clients = session_repository.destroy_all_sessions()
+    except Exception as exc:
+        print(f"[shutdown] No se pudieron limpiar sesiones: {exc}")
+        clients = []
+
+    for ip, mac in clients:
+        try:
+            firewall.deny_client_in_firewall(ip, mac)
+        except Exception as exc:
+            print(f"[shutdown] Error bloqueando {ip}: {exc}")
+
+    session_cleanup_service.stop()
+
+
 def run_server():
+    session_repository.init_store()
+    session_cleanup_service.start()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((HOST, PORT))
         server_socket.listen(50)
         print(f"Servidor HTTP simple escuchando en {HOST}:{PORT}")
-        while True:
-            conn, addr = server_socket.accept()
-            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+        try:
+            while True:
+                conn, addr = server_socket.accept()
+                threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+        except KeyboardInterrupt:
+            print("\nServidor detenido por el usuario.")
+        finally:
+            shutdown_services()
 
 
 if __name__ == "__main__":

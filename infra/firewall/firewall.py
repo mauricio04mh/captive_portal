@@ -1,11 +1,13 @@
-import re
-import ipaddress
+import os
 import subprocess
 
+from helpers.env_loader import load_env_file
 from helpers.ip_mac import validate_ip, validate_mac
 
-LAN_IF = "wlan0"   # TODO: esto va en el .env y debe coincidir con el script de bash
-WAN_IF = "eth0"   
+load_env_file()
+
+LAN_IF = os.getenv("LAN_IF", "wlan0")
+WAN_IF = os.getenv("WAN_IF", "eth0")
 
 
 def _run_iptables(args):

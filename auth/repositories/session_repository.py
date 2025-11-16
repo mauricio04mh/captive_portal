@@ -183,6 +183,22 @@ class SessionRepository:
             self._save_to_disk_locked()
             return ip
 
+    def destroy_all_sessions(self) -> List[Tuple[str, Optional[str]]]:
+        """
+        Elimina todas las sesiones activas del cache y JSON.
+        Devuelve la lista de (ip, mac) para que el firewall
+        pueda limpiar las reglas correspondientes.
+        """
+        with self._lock:
+            clients = [
+                (session["ip"], session.get("mac"))
+                for session in self._sessions.values()
+            ]
+            self._sessions.clear()
+            self._auth_clients.clear()
+            self._save_to_disk_locked()
+            return clients
+
     def cleanup_expired_sessions(self) -> List[Tuple[str, Optional[str]]]:
         """
         Elimina todas las sesiones expiradas del cache y de JSON.

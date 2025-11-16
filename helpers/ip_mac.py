@@ -1,8 +1,13 @@
 import ipaddress
+import os
 import re
 
+from helpers.env_loader import load_env_file
+
+load_env_file()
+
 MAC_REGEX = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
-LAN_IF = "wlan0"  # tiene que coincidir con tu interfaz de cliente #TODO:
+LAN_IF = os.getenv("LAN_IF", "wlan0")  # tiene que coincidir con tu interfaz de cliente #TODO:
 
 
 def validate_ip(ip: str):

@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if [[ -f "$PROJECT_ROOT/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$PROJECT_ROOT/.env"
+    set +a
+fi
+
 WAN_IF="${WAN_IF:-enx0237677e7807}"
 LAN_IF="${LAN_IF:-wlo1}"
 HTTP_PORT="${HTTP_PORT:-8080}"
 
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVER_SCRIPT="$SCRIPT_DIR/server.py"
 SERVER_PID_FILE="/tmp/captive-server.pid"
 SERVER_LOG="/tmp/captive-server.log"

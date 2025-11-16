@@ -1,0 +1,24 @@
+{
+  "auth_clients": {
+    "10.42.0.19": "EO17qcoBYCauoMwYOVegy9Zy7BeUWokPsNarR-0AXyQ",
+    "10.42.0.253": "SIwbatFer_axA6yLdRiLTCb8DNzxrJMAJtWexeJBiQU"
+  },
+  "sessions": {
+    "EO17qcoBYCauoMwYOVegy9Zy7BeUWokPsNarR-0AXyQ": {
+      "expires_at": 1763330904.2172103,
+      "ip": "10.42.0.19",
+      "last_activity": 1763330304.2172103,
+      "login_time": 1763330304.2172103,
+      "mac": "ea:2e:f7:45:e5:9f",
+      "username": "admin"
+    },
+    "SIwbatFer_axA6yLdRiLTCb8DNzxrJMAJtWexeJBiQU": {
+      "expires_at": 1763331066.594072,
+      "ip": "10.42.0.253",
+      "last_activity": 1763330466.594072,
+      "login_time": 1763330466.594072,
+      "mac": "cc:5e:f8:ab:a4:ad",
+      "username": "admin"
+    }
+  }
+}
