@@ -1,9 +1,7 @@
 import json
 import time
-import secrets
 import threading
 from pathlib import Path
-from http.cookies import SimpleCookie
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -20,14 +18,18 @@ class SessionRepository:
 
         # Estado en memoria (cache)
         self._sessions: Dict[str, Dict[str, Any]] = {}
-        self._auth_clients: Dict[str, str] = {}
         self._lock = threading.Lock()
+
+    def _session_key(self, ip: str, mac: Optional[str]) -> str:
+        """Genera una clave única para una sesión a partir de IP/MAC."""
+        mac_part = mac or ""
+        return f"{ip}|{mac_part}"
 
     def _ensure_file_exists(self) -> None:
         """Garantiza que exista el archivo de sesiones en disco."""
         self.sessions_file.parent.mkdir(parents=True, exist_ok=True)
         if not self.sessions_file.exists():
-            self._save_to_disk_locked({"sessions": {}, "auth_clients": {}})
+            self._save_to_disk_locked({"sessions": {}})
 
     def _load_from_disk_locked(self) -> None:
         """
@@ -39,10 +41,9 @@ class SessionRepository:
             with self.sessions_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
         except json.JSONDecodeError:
-            data = {"sessions": {}, "auth_clients": {}}
+            data = {"sessions": {}}
 
         self._sessions = data.get("sessions", {})
-        self._auth_clients = data.get("auth_clients", {})
 
     def _save_to_disk_locked(self, data: Optional[Dict[str, Any]] = None) -> None:
         """
@@ -50,7 +51,7 @@ class SessionRepository:
         IMPORTANTE: Solo llamar con _lock adquirido.
         """
         if data is None:
-            data = {"sessions": self._sessions, "auth_clients": self._auth_clients}
+            data = {"sessions": self._sessions}
 
         self.sessions_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.sessions_file.with_suffix(".tmp")
@@ -70,15 +71,15 @@ class SessionRepository:
 
     def create_session(self, username: str, ip: str, mac: Optional[str] = None) -> str:
         """
-        Crea una nueva sesión, la guarda en memoria y en JSON, y devuelve session_id.
-        Esta función EScritora: modifica el cache y persiste en disco.
+        Crea una nueva sesión indexada por el par (ip, mac) y devuelve la clave.
         """
         now = time.time()
         expires_at = now + self.session_duration
-        session_id = secrets.token_urlsafe(32)
+        session_key = self._session_key(ip, mac)
 
         with self._lock:
-            self._sessions[session_id] = {
+            self._sessions[session_key] = {
+                "session_key": session_key,
                 "username": username,
                 "ip": ip,
                 "mac": mac,
@@ -86,57 +87,28 @@ class SessionRepository:
                 "last_activity": now,
                 "expires_at": expires_at,
             }
-            self._auth_clients[ip] = session_id
-
             self._save_to_disk_locked()
 
-        return session_id
+        return session_key
 
-    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+    def get_session(self, session_key: str) -> Optional[Dict[str, Any]]:
         """
-        Obtiene una sesión por id desde el cache en memoria (con fallback a disco),
-        o None si no existe.
+        Obtiene una sesión por su clave (ip|mac) desde el cache con fallback a disco.
         """
         with self._lock:
-            session = self._sessions.get(session_id)
+            session = self._sessions.get(session_key)
             if session is not None:
                 return session
-            # Reintentamos cargando desde disco si no existe en memoria
             self._load_from_disk_locked()
-            return self._sessions.get(session_id)
+            return self._sessions.get(session_key)
 
-    def get_session_from_cookie(self, headers) -> Optional[Dict[str, Any]]:
-        """
-        Extrae session_id de la cabecera Cookie y devuelve la sesión (o None).
-        `headers` es self.headers del handler. Hace fallback a disco si no está en RAM.
-        """
-        cookie_header = headers.get("Cookie")
-        if not cookie_header:
-            return None
-
-        cookie = SimpleCookie()
-        cookie.load(cookie_header)
-        morsel = cookie.get("session_id")
-        if not morsel:
-            return None
-
-        session_id = morsel.value
-        with self._lock:
-            session = self._sessions.get(session_id)
-            if session is not None:
-                return session
-            # Reintentamos cargando desde disco si no existe en memoria
-            self._load_from_disk_locked()
-            return self._sessions.get(session_id)
-
-    def mark_activity(self, session_id: str) -> bool:
+    def mark_activity(self, session_key: str) -> bool:
         """
         Actualiza last_activity y renueva expires_at para una sesión existente.
-        Escritura: actualiza RAM y persiste en JSON.
         """
         now = time.time()
         with self._lock:
-            session = self._sessions.get(session_id)
+            session = self._sessions.get(session_key)
             if not session:
                 return False
 
@@ -147,41 +119,39 @@ class SessionRepository:
 
     def find_session_by_ip(self, ip: str) -> Optional[Dict[str, Any]]:
         """
-        Devuelve la sesión asociada a una IP (si existe), recargando desde disco si hace falta.
+        Devuelve la primera sesión asociada a una IP, recargando desde disco si hace falta.
         """
         with self._lock:
-            sid = self._auth_clients.get(ip)
-            if not sid:
-                self._load_from_disk_locked()
-                sid = self._auth_clients.get(ip)
-                if not sid:
-                    return None
-            session = self._sessions.get(sid)
-            if session is not None:
-                return session
-            # Si había mapeo pero no sesión, recargamos para sincronizar
+            for session in self._sessions.values():
+                if session.get("ip") == ip:
+                    return session
             self._load_from_disk_locked()
-            return self._sessions.get(sid)
+            for session in self._sessions.values():
+                if session.get("ip") == ip:
+                    return session
+            return None
 
-    def destroy_session(self, session_id: str) -> Optional[str]:
+    def get_session_key_for_ip(self, ip: str) -> Optional[str]:
         """
-        Elimina una sesión (y su relación IP) de memoria y JSON.
-        Devuelve la IP asociada (o None si no existía sesión).
-        Escritura: actualiza RAM y persiste en JSON.
+        Devuelve la clave de sesión asociada a una IP, si existe.
+        """
+        session = self.find_session_by_ip(ip)
+        if session:
+            return session.get("session_key")
+        return None
+
+    def destroy_session(self, session_key: str) -> Optional[Tuple[str, Optional[str]]]:
+        """
+        Elimina una sesión de memoria y JSON.
+        Devuelve el par (ip, mac) asociado o None si no existía.
         """
         with self._lock:
-            session = self._sessions.pop(session_id, None)
+            session = self._sessions.pop(session_key, None)
             if not session:
                 return None
 
-            ip = session["ip"]
-            # borrar mapeo ip -> session_id si coincide
-            current_sid = self._auth_clients.get(ip)
-            if current_sid == session_id:
-                self._auth_clients.pop(ip, None)
-
             self._save_to_disk_locked()
-            return ip
+            return session["ip"], session.get("mac")
 
     def destroy_all_sessions(self) -> List[Tuple[str, Optional[str]]]:
         """
@@ -195,7 +165,6 @@ class SessionRepository:
                 for session in self._sessions.values()
             ]
             self._sessions.clear()
-            self._auth_clients.clear()
             self._save_to_disk_locked()
             return clients
 
@@ -211,15 +180,12 @@ class SessionRepository:
 
         with self._lock:
             to_delete: List[Tuple[str, str, Optional[str]]] = []
-            for sid, session in self._sessions.items():
+            for key, session in list(self._sessions.items()):
                 if session.get("expires_at", 0) <= now:
-                    to_delete.append((sid, session["ip"], session.get("mac")))
+                    to_delete.append((key, session["ip"], session.get("mac")))
 
-            for sid, ip, mac in to_delete:
-                self._sessions.pop(sid, None)
-                current_sid = self._auth_clients.get(ip)
-                if current_sid == sid:
-                    self._auth_clients.pop(ip, None)
+            for key, ip, mac in to_delete:
+                self._sessions.pop(key, None)
                 expired_clients.append((ip, mac))
 
             if to_delete:

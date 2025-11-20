@@ -4,7 +4,6 @@ import signal
 import socket
 import ssl
 import threading
-from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -24,7 +23,7 @@ PORTAL_HOST = os.getenv("PORTAL_HOST", "10.42.0.1")
 TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "login.html"
 CERT_FILE = Path(__file__).resolve().parent / "certs" / "portal.crt"
 KEY_FILE = Path(__file__).resolve().parent / "certs" / "portal.key"
-
+#TODO: NO SE ESTAN USANDO
 STATUS_REASONS = {
     200: "OK",
     400: "Bad Request",
@@ -79,18 +78,6 @@ def send_html(conn, status_code, html_text):
     conn.sendall(response)
 
 
-def _extract_session_id(headers):
-    cookie_header = headers.get("cookie") or headers.get("Cookie")
-    if not cookie_header:
-        return None
-    cookie = SimpleCookie()
-    cookie.load(cookie_header)
-    morsel = cookie.get("session_id")
-    if not morsel:
-        return None
-    return morsel.value
-
-
 def parse_http_request(conn):
     data = b""
     while b"\r\n\r\n" not in data:
@@ -130,10 +117,7 @@ def parse_http_request(conn):
     return method, path, version, headers, body
 
 
-def handle_login(method, headers, body, client_ip):
-    if method != "POST":
-        return 405, {"status": "error", "message": "Method Not Allowed"}, None
-
+def handle_login(headers, body, client_ip):
     content_type = headers.get("content-type", "")
     content_type = content_type.split(";")[0].strip() or "application/json"
 
@@ -145,7 +129,7 @@ def handle_login(method, headers, body, client_ip):
             data = json.loads(body.decode("utf-8"))
         except json.JSONDecodeError:
             return 400, {"status": "error", "message": "JSON inválido"}, None
-        username = data.get("username") or data.get("email")
+        username = data.get("username")
         password = data.get("password")
     elif content_type == "application/x-www-form-urlencoded":
         parsed = parse_qs(body.decode("utf-8"))
@@ -162,11 +146,7 @@ def handle_login(method, headers, body, client_ip):
 
     if user_repository.verify_credentials(username, password):
         mac = get_mac_for_ip(client_ip)
-        session_id = session_repository.create_session(username, client_ip, mac)
-        cookie = (
-            f"session_id={session_id}; Path=/; HttpOnly; "
-            f"Max-Age={session_repository.session_duration}"
-        )
+        session_repository.create_session(username, client_ip, mac)
 
         try:
             firewall.allow_client_in_firewall(client_ip, mac)
@@ -177,7 +157,7 @@ def handle_login(method, headers, body, client_ip):
             "status": "ok",
             "message": "Login exitoso",
             "username": username,
-        }, {"Set-Cookie": cookie}
+        }, None
 
     return 401, {
         "status": "error",
@@ -185,31 +165,35 @@ def handle_login(method, headers, body, client_ip):
     }, None
 
 
-def handle_logout(headers):
-    session_id = _extract_session_id(headers)
-    clear_cookie = "session_id=; Path=/; Max-Age=0; HttpOnly"
-    if not session_id:
+def handle_logout(client_ip):
+    session_key = session_repository.get_session_key_for_ip(client_ip)
+    if not session_key:
         return 200, {
             "status": "ok",
             "message": "No había sesión activa",
-        }, {"Set-Cookie": clear_cookie}
+        }, None
 
-    session = session_repository.get_session(session_id)
-    session_repository.destroy_session(session_id)
+    session = session_repository.get_session(session_key)
+    destroyed = session_repository.destroy_session(session_key)
 
-    if session:
-        ip = session.get("ip")
+    ip = client_ip
+    mac = None
+    if destroyed:
+        ip, mac = destroyed
+    elif session:
+        ip = session.get("ip") or client_ip
         mac = session.get("mac")
-        if ip:
-            try:
-                firewall.deny_client_in_firewall(ip, mac)
-            except Exception as exc:
-                print(f"[firewall] No se pudo bloquear {ip}: {exc}")
+
+    if ip:
+        try:
+            firewall.deny_client_in_firewall(ip, mac)
+        except Exception as exc:
+            print(f"[firewall] No se pudo bloquear {ip}: {exc}")
 
     return 200, {
         "status": "ok",
         "message": "Sesión cerrada",
-    }, {"Set-Cookie": clear_cookie}
+    }, None
 
 
 def serve_login_page():
@@ -260,11 +244,11 @@ def handle_client(conn, addr):
             send_html(conn, status_code, html)
         elif method == "POST" and path == "/login":
             status_code, payload, extra_headers = handle_login(
-                method, headers, body, client_ip
+                headers, body, client_ip
             )
             send_json(conn, status_code, payload, headers=extra_headers)
         elif method == "POST" and path == "/logout":
-            status_code, payload, extra_headers = handle_logout(headers)
+            status_code, payload, extra_headers = handle_logout(client_ip)
             send_json(conn, status_code, payload, headers=extra_headers)
         else:
             send_json(conn, 404, {"status": "error", "message": "Endpoint no encontrado"})
@@ -290,7 +274,7 @@ def shutdown_services():
             print(f"[shutdown] Error bloqueando {ip}: {exc}")
 
     session_cleanup_service.stop()
-    shutdown_services._done = True  # type: ignore[attr-defined]
+    shutdown_services._done = True  
 
 
 def _handle_termination(signum, _frame):
