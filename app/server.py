@@ -1,6 +1,8 @@
 import json
+import os
 import signal
 import socket
+import ssl
 import threading
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -9,12 +11,19 @@ from urllib.parse import parse_qs
 from auth.repositories.session_repository import SessionRepository
 from auth.repositories.user_repository import UserRepository
 from auth.services.session_cleanup_service import SessionCleanupService
+from helpers.env_loader import load_env_file
 from helpers.ip_mac import get_mac_for_ip
 from infra.firewall import firewall as firewall_module
 
+load_env_file()
+
 HOST = "0.0.0.0"
-PORT = 8080
+PORT = int(os.getenv("HTTPS_PORT", "8443"))
+REDIRECT_PORT = int(os.getenv("HTTP_REDIRECT_PORT", "8080"))
+PORTAL_HOST = os.getenv("PORTAL_HOST", "10.42.0.1")
 TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "login.html"
+CERT_FILE = Path(__file__).resolve().parent / "certs" / "portal.crt"
+KEY_FILE = Path(__file__).resolve().parent / "certs" / "portal.key"
 
 STATUS_REASONS = {
     200: "OK",
@@ -33,6 +42,7 @@ session_cleanup_service = SessionCleanupService(session_repository)
 firewall = firewall_module
 _shutdown_event = threading.Event()
 _server_socket: socket.socket | None = None
+_redirect_socket: socket.socket | None = None
 
 
 def build_response(status_code, body=b"", headers=None):
@@ -210,6 +220,27 @@ def serve_login_page():
         return 500, "<h1>Error 500</h1><p>Template no disponible</p>"
 
 
+def handle_redirect_client(conn, addr):
+    redirect_host = PORTAL_HOST
+    location = f"https://{redirect_host}:{PORT}/login"
+    body = (
+        "<html><head><title>Redirigiendo...</title></head>"
+        f"<body>Redirigiendo a <a href=\"{location}\">{location}</a></body></html>"
+    )
+    response = build_response(
+        302,
+        body=body.encode("utf-8"),
+        headers={
+            "Content-Type": "text/html; charset=utf-8",
+            "Location": location,
+        },
+    )
+    try:
+        conn.sendall(response)
+    finally:
+        conn.close()
+
+
 def handle_client(conn, addr):
     client_ip, _ = addr
     try:
@@ -276,6 +307,16 @@ def _handle_termination(signum, _frame):
             sock.close()
         except OSError:
             pass
+    redirect_sock = _redirect_socket
+    if redirect_sock:
+        try:
+            redirect_sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            redirect_sock.close()
+        except OSError:
+            pass
 
 
 def run_server():
@@ -283,13 +324,22 @@ def run_server():
     session_cleanup_service.start()
     signal.signal(signal.SIGTERM, _handle_termination)
     signal.signal(signal.SIGINT, _handle_termination)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile=str(CERT_FILE), keyfile=str(KEY_FILE))
+
+    redirect_thread = threading.Thread(
+        target=run_http_redirect_server,
+        name="HTTPRedirectServer",
+        daemon=True,
+    )
+    redirect_thread.start()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
         global _server_socket
         _server_socket = server_socket
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((HOST, PORT))
         server_socket.listen(50)
-        print(f"Servidor HTTP simple escuchando en {HOST}:{PORT}")
+        print(f"Servidor HTTPS simple escuchando en {HOST}:{PORT}")
         try:
             while not _shutdown_event.is_set():
                 try:
@@ -298,11 +348,37 @@ def run_server():
                     if _shutdown_event.is_set():
                         break
                     raise
+                try:
+                    tls_conn = context.wrap_socket(conn, server_side=True)
+                except ssl.SSLError as exc:
+                    print(f"[ssl] Error de handshake con {addr}: {exc}")
+                    conn.close()
+                    continue
                 threading.Thread(
-                    target=handle_client, args=(conn, addr), daemon=True
+                    target=handle_client, args=(tls_conn, addr), daemon=True
                 ).start()
         finally:
             shutdown_services()
+
+
+def run_http_redirect_server():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as redirect_socket:
+        global _redirect_socket
+        _redirect_socket = redirect_socket
+        redirect_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        redirect_socket.bind((HOST, REDIRECT_PORT))
+        redirect_socket.listen(50)
+        print(f"Servidor HTTP de redirección escuchando en {HOST}:{REDIRECT_PORT}")
+        while not _shutdown_event.is_set():
+            try:
+                conn, addr = redirect_socket.accept()
+            except OSError:
+                if _shutdown_event.is_set():
+                    break
+                raise
+            threading.Thread(
+                target=handle_redirect_client, args=(conn, addr), daemon=True
+            ).start()
 
 
 if __name__ == "__main__":

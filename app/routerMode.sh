@@ -13,7 +13,8 @@ fi
 
 WAN_IF="${WAN_IF:-enx0237677e7807}"
 LAN_IF="${LAN_IF:-wlo1}"
-HTTP_PORT="${HTTP_PORT:-8080}"
+HTTP_REDIRECT_PORT="${HTTP_REDIRECT_PORT:-8080}"
+HTTPS_PORT="${HTTPS_PORT:-8443}"
 
 SERVER_SCRIPT="$SCRIPT_DIR/server.py"
 SERVER_PID_FILE="/tmp/captive-server.pid"
@@ -55,7 +56,7 @@ stop_server() {
 }
 
 open_login() {
-    local url="http://127.0.0.1:${HTTP_PORT}/login"
+    local url="https://127.0.0.1:${HTTPS_PORT}/login"
     if command -v xdg-open >/dev/null; then
         xdg-open "$url" >/dev/null 2>&1 || true
     elif command -v open >/dev/null; then
@@ -84,11 +85,11 @@ start_router() {
     iptables -t nat -A POSTROUTING -o "$WAN_IF" -j MASQUERADE
     iptables -A FORWARD -i "$WAN_IF" -o "$LAN_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
     iptables -A FORWARD -i "$LAN_IF" -o "$WAN_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    iptables -t nat -A PREROUTING -i "$LAN_IF" -p tcp --dport 80 -j REDIRECT --to-port "$HTTP_PORT"
+    iptables -t nat -A PREROUTING -i "$LAN_IF" -p tcp --dport 80 -j REDIRECT --to-port "$HTTP_REDIRECT_PORT"
 
     start_server
     open_login
-    echo "Portal cautivo activo en http://127.0.0.1:${HTTP_PORT}/login"
+    echo "Portal cautivo activo en https://127.0.0.1:${HTTPS_PORT}/login"
 }
 
 stop_router() {
