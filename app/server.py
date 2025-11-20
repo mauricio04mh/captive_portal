@@ -23,17 +23,7 @@ PORTAL_HOST = os.getenv("PORTAL_HOST", "10.42.0.1")
 TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "login.html"
 CERT_FILE = Path(__file__).resolve().parent / "certs" / "portal.crt"
 KEY_FILE = Path(__file__).resolve().parent / "certs" / "portal.key"
-#TODO: NO SE ESTAN USANDO
-STATUS_REASONS = {
-    200: "OK",
-    400: "Bad Request",
-    401: "Unauthorized",
-    403: "Forbidden",
-    404: "Not Found",
-    405: "Method Not Allowed",
-    415: "Unsupported Media Type",
-    500: "Internal Server Error",
-}
+
 
 user_repository = UserRepository()
 session_repository = SessionRepository()
@@ -45,7 +35,7 @@ _redirect_socket: socket.socket | None = None
 
 
 def build_response(status_code, body=b"", headers=None):
-    reason = STATUS_REASONS.get(status_code, "OK")
+    reason = "OK"
     status_line = f"HTTP/1.1 {status_code} {reason}\r\n"
     headers = headers or {}
     base_headers = {

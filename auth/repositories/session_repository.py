@@ -13,7 +13,8 @@ class SessionRepository:
         session_duration: int = 10 * 60, #10 minutos
     ) -> None:
         base_path = Path(__file__).resolve().parent
-        self.sessions_file = sessions_file or (base_path / "data" / "sessions.json")
+        # Guardamos las sesiones en auth/db (fuera de repositories)
+        self.sessions_file = sessions_file or (base_path.parent / "db" / "sessions.json")
         self.session_duration = session_duration
 
         # Estado en memoria (cache)
