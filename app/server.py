@@ -136,6 +136,17 @@ def handle_login(headers, body, client_ip):
 
     if user_repository.verify_credentials(username, password):
         mac = get_mac_for_ip(client_ip)
+
+        existing_session = session_repository.find_session_by_ip(client_ip)
+        if existing_session:
+            existing_mac = (existing_session.get("mac") or "").lower()
+            current_mac = (mac or "").lower()
+            if existing_mac and current_mac and existing_mac != current_mac:
+                return 403, {
+                    "status": "error",
+                    "message": "La IP ya está asociada a otro dispositivo",
+                }, None
+
         session_repository.create_session(username, client_ip, mac)
 
         try:
