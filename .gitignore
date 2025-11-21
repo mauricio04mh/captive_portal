@@ -1,3 +1,4 @@
 __pycache__
 app/certs/portal.key
 app/certs/portal.crt
+.env
