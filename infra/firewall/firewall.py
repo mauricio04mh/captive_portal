@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 
 from helpers.env_loader import load_env_file
@@ -15,6 +16,25 @@ def _run_iptables(args):
     # Para debug:
     print("[iptables]", " ".join(cmd))
     subprocess.run(cmd, check=True)
+
+
+def _flush_conntrack(ip: str) -> None:
+    """
+    Elimina entradas de conntrack para la IP para que no sigan vivas
+    conexiones ya establecidas después de cerrar sesión.
+    """
+    conntrack_bin = shutil.which("conntrack")
+    if not conntrack_bin:
+        print("[conntrack] comando no encontrado, no se limpiaron entradas")
+        return
+
+    for flag in ("-s", "-d"):  # salida y posible tráfico entrante
+        cmd = [conntrack_bin, "-D", "-f", "ipv4", flag, ip]
+        try:
+            subprocess.run(cmd, check=True)
+            print(f"[conntrack] Limpias entradas {flag} {ip}")
+        except subprocess.CalledProcessError as exc:
+            print(f"[conntrack] No se pudieron limpiar conntrack {flag} {ip}: {exc}")
 
 
 def allow_client_in_firewall(ip: str, mac: str | None = None):
@@ -38,6 +58,7 @@ def allow_client_in_firewall(ip: str, mac: str | None = None):
     args += ["-j", "ACCEPT"]
 
     _run_iptables(args)
+    _flush_conntrack(ip)
 
 
 def deny_client_in_firewall(ip: str, mac: str | None = None):
@@ -61,3 +82,4 @@ def deny_client_in_firewall(ip: str, mac: str | None = None):
     args += ["-j", "ACCEPT"]
 
     _run_iptables(args)
+    _flush_conntrack(ip)

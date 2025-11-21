@@ -3,6 +3,10 @@
     "admin": {
       "salt": "75592f392edf4febbe35b218973dcc84",
       "password_hash": "7c32a09cb2d327136f5354d84c17171bd208205960ebaed5ac2e706693d59a69"
+    },
+    "landy123": {
+      "salt": "b304428ddba7d2117b1e376a8cf46ff5",
+      "password_hash": "2afa37dba80e5e08dcd901f1dc191bc133599b5501f40a4ce441a9fa7a85997f"
     }
   }
 }

@@ -13,7 +13,8 @@ class UserRepository:
 
     def __init__(self, users_file: Optional[Path] = None) -> None:
         base_dir = Path(__file__).resolve().parent
-        self.users_file = users_file or (base_dir / "db" / "users.json")
+        # Guardamos los usuarios en auth/db (fuera de repositories)
+        self.users_file = users_file or (base_dir.parent / "db" / "users.json")
         self._lock = threading.Lock()
         self._users_cache: Optional[Dict[str, Any]] = None
 
