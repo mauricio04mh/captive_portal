@@ -13,7 +13,7 @@ from auth.repositories.user_repository import UserRepository
 from auth.services.session_cleanup_service import SessionCleanupService
 from helpers.env_loader import load_env_file
 from helpers.ip_mac import get_mac_for_ip
-from infra.firewall import firewall as firewall_module
+from . import firewall as firewall_module
 
 load_env_file()
 

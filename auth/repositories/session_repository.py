@@ -1,3 +1,4 @@
+import heapq
 import json
 import time
 import secrets
@@ -13,10 +14,12 @@ class SessionRepository:
         self,
         sessions_file: Path | None = None,
         session_duration: int = 10 * 60, #10 minutos
+        max_cache_size: int | None = 1000,
     ) -> None:
         base_path = Path(__file__).resolve().parent
         self.sessions_file = sessions_file or (base_path / "data" / "sessions.json")
         self.session_duration = session_duration
+        self.max_cache_size = max_cache_size
 
         # Estado en memoria (cache)
         self._sessions: Dict[str, Dict[str, Any]] = {}
@@ -44,6 +47,9 @@ class SessionRepository:
         self._sessions = data.get("sessions", {})
         self._auth_clients = data.get("auth_clients", {})
 
+        if self._enforce_cache_limit_locked():
+            self._save_to_disk_locked()
+
     def _save_to_disk_locked(self, data: Optional[Dict[str, Any]] = None) -> None:
         """
         Escribe el estado actual a disco.
@@ -59,6 +65,18 @@ class SessionRepository:
             json.dump(data, f, indent=2, sort_keys=True)
 
         tmp.replace(self.sessions_file)
+
+    def _get_session_by_id_locked(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Obtiene una sesión intentando primero el cache y recargando desde disco
+        si hiciera falta. IMPORTANTE: solo llamar con _lock adquirido.
+        """
+        session = self._sessions.get(session_id)
+        if session is not None:
+            return session
+
+        self._load_from_disk_locked()
+        return self._sessions.get(session_id)
 
     def init_store(self) -> None:
         """
@@ -87,7 +105,7 @@ class SessionRepository:
                 "expires_at": expires_at,
             }
             self._auth_clients[ip] = session_id
-
+            self._enforce_cache_limit_locked()
             self._save_to_disk_locked()
 
         return session_id
@@ -98,12 +116,7 @@ class SessionRepository:
         o None si no existe.
         """
         with self._lock:
-            session = self._sessions.get(session_id)
-            if session is not None:
-                return session
-            # Reintentamos cargando desde disco si no existe en memoria
-            self._load_from_disk_locked()
-            return self._sessions.get(session_id)
+            return self._get_session_by_id_locked(session_id)
 
     def get_session_from_cookie(self, headers) -> Optional[Dict[str, Any]]:
         """
@@ -122,12 +135,7 @@ class SessionRepository:
 
         session_id = morsel.value
         with self._lock:
-            session = self._sessions.get(session_id)
-            if session is not None:
-                return session
-            # Reintentamos cargando desde disco si no existe en memoria
-            self._load_from_disk_locked()
-            return self._sessions.get(session_id)
+            return self._get_session_by_id_locked(session_id)
 
     def mark_activity(self, session_id: str) -> bool:
         """
@@ -156,12 +164,7 @@ class SessionRepository:
                 sid = self._auth_clients.get(ip)
                 if not sid:
                     return None
-            session = self._sessions.get(sid)
-            if session is not None:
-                return session
-            # Si había mapeo pero no sesión, recargamos para sincronizar
-            self._load_from_disk_locked()
-            return self._sessions.get(sid)
+            return self._get_session_by_id_locked(sid)
 
     def destroy_session(self, session_id: str) -> Optional[str]:
         """
@@ -227,4 +230,62 @@ class SessionRepository:
 
         return expired_clients
 
-#TODO: QUE la cache funcione bien, con tamanno limite
+    def _evict_session_locked(self, session_id: str) -> None:
+        session = self._sessions.pop(session_id, None)
+        if not session:
+            return
+
+        ip = session.get("ip")
+        if ip and self._auth_clients.get(ip) == session_id:
+            self._auth_clients.pop(ip, None)
+
+    def _enforce_cache_limit_locked(self) -> bool:
+        """
+        Garantiza que el cache no exceda max_cache_size.
+        Prioriza limpiar sesiones expiradas y, si sigue sobrando,
+        elimina las menos recientes por last_activity/login_time.
+        Devuelve True si se evicto algo.
+        IMPORTANTE: llamar solo con _lock adquirido.
+        """
+        limit = self.max_cache_size
+        if not limit or limit <= 0:
+            return False
+
+        current_size = len(self._sessions)
+        if current_size <= limit:
+            return False
+
+        now = time.time()
+        evicted_any = False
+
+        expired_ids = [
+            sid
+            for sid, session in self._sessions.items()
+            if session.get("expires_at", 0) <= now
+        ]
+
+        if expired_ids:
+            evicted_any = True
+            for sid in expired_ids:
+                self._evict_session_locked(sid)
+
+            current_size = len(self._sessions)
+            if current_size <= limit:
+                return True
+
+        excess = current_size - limit
+        if excess <= 0:
+            return evicted_any
+
+        candidates = heapq.nsmallest(
+            excess,
+            self._sessions.items(),
+            key=lambda item: item[1].get("last_activity")
+            or item[1].get("login_time")
+            or 0.0,
+        )
+
+        for sid, _ in candidates:
+            self._evict_session_locked(sid)
+
+        return True

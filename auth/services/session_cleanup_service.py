@@ -2,7 +2,7 @@ import threading
 from typing import Tuple
 
 from auth.repositories.session_repository import SessionRepository
-from infra.firewall import firewall as firewall_module
+from . import firewall as firewall_module
 
 
 class SessionCleanupService:
