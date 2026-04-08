@@ -4,7 +4,6 @@ import signal
 import socket
 import ssl
 import threading
-from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -79,18 +78,6 @@ def send_html(conn, status_code, html_text):
     conn.sendall(response)
 
 
-def _extract_session_id(headers):
-    cookie_header = headers.get("cookie") or headers.get("Cookie")
-    if not cookie_header:
-        return None
-    cookie = SimpleCookie()
-    cookie.load(cookie_header)
-    morsel = cookie.get("session_id")
-    if not morsel:
-        return None
-    return morsel.value
-
-
 def parse_http_request(conn):
     data = b""
     while b"\r\n\r\n" not in data:
@@ -163,10 +150,6 @@ def handle_login(method, headers, body, client_ip):
     if user_repository.verify_credentials(username, password):
         mac = get_mac_for_ip(client_ip)
         session_id = session_repository.create_session(username, client_ip, mac)
-        cookie = (
-            f"session_id={session_id}; Path=/; HttpOnly; "
-            f"Max-Age={session_repository.session_duration}"
-        )
 
         try:
             firewall.allow_client_in_firewall(client_ip, mac)
@@ -177,7 +160,7 @@ def handle_login(method, headers, body, client_ip):
             "status": "ok",
             "message": "Login exitoso",
             "username": username,
-        }, {"Set-Cookie": cookie}
+        }, None
 
     return 401, {
         "status": "error",
@@ -185,31 +168,24 @@ def handle_login(method, headers, body, client_ip):
     }, None
 
 
-def handle_logout(headers):
-    session_id = _extract_session_id(headers)
-    clear_cookie = "session_id=; Path=/; Max-Age=0; HttpOnly"
-    if not session_id:
-        return 200, {
-            "status": "ok",
-            "message": "No había sesión activa",
-        }, {"Set-Cookie": clear_cookie}
+def handle_logout(client_ip: str):
+    mac = get_mac_for_ip(client_ip)
 
-    session = session_repository.get_session(session_id)
-    session_repository.destroy_session(session_id)
+    session = session_repository.get_session(client_ip, mac)
+    removed = session_repository.destroy_session(client_ip, mac)
 
     if session:
-        ip = session.get("ip")
-        mac = session.get("mac")
-        if ip:
-            try:
-                firewall.deny_client_in_firewall(ip, mac)
-            except Exception as exc:
-                print(f"[firewall] No se pudo bloquear {ip}: {exc}")
+        ip = session.get("ip", client_ip)
+        mac_in_session = session.get("mac")
+        try:
+            firewall.deny_client_in_firewall(ip, mac_in_session)
+        except Exception as exc:
+            print(f"[firewall] No se pudo bloquear {ip}: {exc}")
 
-    return 200, {
-        "status": "ok",
-        "message": "Sesión cerrada",
-    }, {"Set-Cookie": clear_cookie}
+        return 200, {"status": "ok", "message": "Sesión cerrada"}, None
+
+    return 200, {"status": "ok", "message": "No había sesión activa"}, None
+
 
 
 def serve_login_page():
@@ -264,7 +240,7 @@ def handle_client(conn, addr):
             )
             send_json(conn, status_code, payload, headers=extra_headers)
         elif method == "POST" and path == "/logout":
-            status_code, payload, extra_headers = handle_logout(headers)
+            status_code, payload, extra_headers = handle_logout(client_ip)
             send_json(conn, status_code, payload, headers=extra_headers)
         else:
             send_json(conn, 404, {"status": "error", "message": "Endpoint no encontrado"})
